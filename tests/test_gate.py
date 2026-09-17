@@ -36,10 +36,22 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["decision"], "block")
         self.assertIn(HELP_HINT, result["reason"])
 
-    def test_first_use_requires_mode(self):
-        self.assert_blocked(self.submit())
-        self.assertIsNone(self.store.mode())
-        self.assertIsNone(self.store.last("session-a"))
+    def test_first_use_defaults_to_remind_without_configuration(self):
+        self.assertEqual(self.submit(), {})
+        self.assertEqual(self.store.mode(), "remind")
+        self.assertEqual(self.store.last("session-a")[0], self.now)
+
+    def test_default_mode_reminds_after_timeout_without_configuration(self):
+        self.assertEqual(self.submit(), {})
+        self.expire()
+        self.gate = Gate(Store(self.directory), lambda: self.now)
+        self.assertEqual(set(self.submit()), {"systemMessage"})
+
+    def test_status_reports_default_without_changing_explicit_choice(self):
+        self.assertIn("仅提醒", self.submit("cachegate status")["stopReason"])
+        self.submit("cachegate confirm")
+        self.gate = Gate(Store(self.directory), lambda: self.now)
+        self.assertIn("超时确认", self.submit("cachegate status")["stopReason"])
 
     def test_help_is_local_without_state_file(self):
         result = self.submit("cachegate help")
@@ -200,7 +212,7 @@ class GateTests(unittest.TestCase):
                 result = self.submit("cachegate " + command)
                 self.assertFalse(result["continue"])
                 self.assertIn(HELP_HINT, result["stopReason"])
-        self.assertIsNone(self.store.mode())
+        self.assertEqual(self.store.mode(), "remind")
 
     def test_mode_command_can_repair_invalid_mode(self):
         with self.store.transaction() as db:

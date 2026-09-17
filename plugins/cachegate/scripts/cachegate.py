@@ -18,18 +18,21 @@ import time
 
 THRESHOLD_SECONDS = 30 * 60
 MODES = ("remind", "confirm")
-LABELS = {None: "未配置", "remind": "仅提醒", "confirm": "超时确认"}
+DEFAULT_MODE = "remind"
+LABELS = {"remind": "仅提醒", "confirm": "超时确认"}
 HELP_HINT = "切换模式等功能见 cachegate help。"
-HELP_TEXT = """CacheGate：在 Codex 输入框独立提交以下命令。
+HELP_TEXT = """CacheGate：默认仅提醒。在 Codex 输入框独立提交以下命令。
 
 cachegate remind   超过 30 分钟时仅提醒
 cachegate confirm  超过 30 分钟时拦截
 cachegate status   查看当前模式
-cachegate allow    允许本会话最近被拦截的消息，随后原样重发
-cachegate cancel   撤销本会话的单次许可
+
+仅在超时拦截后使用：
+cachegate allow    允许原样重发最近被拦截的消息一次，不会自动发送
+cachegate cancel   撤销单次许可和待确认记录
 
 模式在本机共享，下次提交生效。单次许可只用于对应会话和消息文本。
-首次使用请先选择模式。也可手动 /clear 新建会话，再输入请求。
+不想发送时直接不重发即可，无需 cancel。也可手动 /clear 新建会话。
 时间阈值无法保证 KV 缓存命中，/clear 不会恢复过期缓存。"""
 
 
@@ -82,7 +85,7 @@ def read_mode(db):
     row = db.execute("SELECT value FROM settings WHERE key = 'mode'").fetchone()
     if row and row[0] not in MODES:
         raise ValueError("Invalid saved mode")
-    return row[0] if row else None
+    return row[0] if row else DEFAULT_MODE
 
 
 def stopped(message):
@@ -142,8 +145,6 @@ class Gate:
 
     def check(self, db, payload, session, turn):
         mode = read_mode(db)
-        if mode is None:
-            return blocked("请先选择模式。" + HELP_HINT)
         now = self.clock()
         if not math.isfinite(now):
             raise ValueError("Invalid clock")

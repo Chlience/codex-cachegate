@@ -1,6 +1,6 @@
 {
   "name": "cachegate",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Check idle time locally before submitting Codex messages, with in-composer controls.",
   "author": {
     "name": "chlience"
@@ -8,7 +8,7 @@
   "interface": {
     "displayName": "CacheGate",
     "shortDescription": "发送前检查会话是否已间隔超过 30 分钟。",
-    "longDescription": "按会话检查消息间隔，支持仅提醒和单次放行。在输入框提交 cachegate help 查看操作；按需运行，无需 MCP。时间间隔无法证明 KV 缓存是否命中。",
+    "longDescription": "按会话检查消息间隔，默认仅提醒，可切换为超时拦截。在输入框提交 cachegate help 查看操作；按需运行，无需 MCP。时间间隔无法证明 KV 缓存是否命中。",
     "developerName": "chlience",
     "category": "Productivity",
     "capabilities": [],

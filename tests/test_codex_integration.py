@@ -176,45 +176,50 @@ supports_websockets = false
                 db.execute("UPDATE sessions SET last_at = ? WHERE id = ?", (time.time() - 1801, thread))
             return store.last(thread)
 
-        submit("First unconfigured request", 0)
-        self.assertIsNone(store.mode())
+        def check_reminder():
+            warning = client.wait(
+                lambda x: x.get("method") == "hook/completed"
+                and any("本次继续发送" in e.get("text", "") for e in x["params"]["run"]["entries"])
+            )
+            notices = [e["text"] for e in warning["params"]["run"]["entries"] if "本次继续发送" in e.get("text", "")]
+            self.assertEqual(len(notices), 1)
+            self.assertLess(len(notices[0]), 90)
+            self.assertIn("cachegate help", notices[0])
+
         submit("cachegate help", 0)
         help_event = client.wait(
             lambda x: x.get("method") == "hook/completed"
             and any("cachegate allow" in entry.get("text", "") for entry in x["params"]["run"]["entries"])
         )
         self.assertTrue(help_event)
-        submit("cachegate confirm", 0)
-        self.assertEqual(store.mode(), "confirm")
         submit("Fresh model request", 1)
-
-        baseline = expire()
-        submit("Pending model request", 1)
-        self.assertEqual(store.last(thread), baseline)
-        submit("cachegate status", 1)
-        submit("cachegate help", 1)
-        self.assertEqual(store.last(thread), baseline)
-        submit("cachegate allow", 1)
-        self.assertEqual(store.last(thread), baseline)
-        submit("Pending model request", 2)
-
-        baseline = expire()
-        submit("Cancelled then reminded request", 2)
-        submit("cachegate allow", 2)
-        submit("cachegate cancel", 2)
-        submit("Cancelled then reminded request", 2)
-        self.assertEqual(store.last(thread), baseline)
-        submit("cachegate remind", 2)
         self.assertEqual(store.mode(), "remind")
+        expire()
+        submit("Default reminder request", 2)
+        check_reminder()
+        submit("cachegate confirm", 2)
+        self.assertEqual(store.mode(), "confirm")
+
+        baseline = expire()
+        submit("Pending model request", 2)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate status", 2)
+        submit("cachegate help", 2)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate allow", 2)
+        self.assertEqual(store.last(thread), baseline)
+        submit("Pending model request", 3)
+
+        baseline = expire()
         submit("Cancelled then reminded request", 3)
-        warning = client.wait(
-            lambda x: x.get("method") == "hook/completed"
-            and any("本次继续发送" in e.get("text", "") for e in x["params"]["run"]["entries"])
-        )
-        notices = [e["text"] for e in warning["params"]["run"]["entries"] if "本次继续发送" in e.get("text", "")]
-        self.assertEqual(len(notices), 1)
-        self.assertLess(len(notices[0]), 90)
-        self.assertIn("cachegate help", notices[0])
+        submit("cachegate allow", 3)
+        submit("cachegate cancel", 3)
+        submit("Cancelled then reminded request", 3)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate remind", 3)
+        self.assertEqual(store.mode(), "remind")
+        submit("Cancelled then reminded request", 4)
+        check_reminder()
         self.assertFalse(any(x.get("method") == "mcpServer/elicitation/request" for x in client.backlog))
         self.assertFalse(any(
             x.get("method") == "mcpServer/startupStatus"
@@ -227,10 +232,12 @@ supports_websockets = false
         for local_only in (
             "cachegate help", "cachegate confirm", "cachegate status",
             "cachegate allow", "cachegate cancel", "cachegate remind",
-            "First unconfigured request", "CacheGate", "mcp__cachegate",
+            "CacheGate", "mcp__cachegate",
         ):
             self.assertNotIn(local_only, model_text)
         self.assertIn("Pending model request", model_text)
+        self.assertIn("Fresh model request", model_text)
+        self.assertIn("Default reminder request", model_text)
         self.assertIn("Cancelled then reminded request", model_text)
         (scratch / "model-requests.json").write_text(
             json.dumps(payloads, ensure_ascii=False, indent=2), encoding="utf-8"
