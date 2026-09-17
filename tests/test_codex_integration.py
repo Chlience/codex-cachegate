@@ -186,6 +186,16 @@ supports_websockets = false
             self.assertLess(len(notices[0]), 90)
             self.assertIn("cachegate help", notices[0])
 
+        def check_blocked():
+            warning = client.wait(
+                lambda x: x.get("method") == "hook/completed"
+                and any("本次已拦截" in e.get("text", "") for e in x["params"]["run"]["entries"])
+            )
+            notices = [e["text"] for e in warning["params"]["run"]["entries"] if "本次已拦截" in e.get("text", "")]
+            self.assertEqual(len(notices), 1)
+            self.assertIn("cachegate allow", notices[0])
+            self.assertNotIn("cachegate help", notices[0])
+
         submit("cachegate help", 0)
         help_event = client.wait(
             lambda x: x.get("method") == "hook/completed"
@@ -201,7 +211,12 @@ supports_websockets = false
         self.assertEqual(store.mode(), "confirm")
 
         baseline = expire()
+        submit("Older blocked request", 2)
+        check_blocked()
+        submit("Another blocked request", 2)
+        check_blocked()
         submit("Pending model request", 2)
+        check_blocked()
         self.assertEqual(store.last(thread), baseline)
         submit("cachegate status", 2)
         submit("cachegate help", 2)
@@ -233,6 +248,7 @@ supports_websockets = false
             "cachegate help", "cachegate confirm", "cachegate status",
             "cachegate allow", "cachegate cancel", "cachegate remind",
             "CacheGate", "mcp__cachegate",
+            "Older blocked request", "Another blocked request",
         ):
             self.assertNotIn(local_only, model_text)
         self.assertIn("Pending model request", model_text)

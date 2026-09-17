@@ -21,6 +21,7 @@ MODES = ("remind", "confirm")
 DEFAULT_MODE = "remind"
 LABELS = {"remind": "仅提醒", "confirm": "超时确认"}
 HELP_HINT = "切换模式等功能见 cachegate help。"
+ALLOW_HINT = "提交 cachegate allow 后，原样重发最后一条被拦截的消息。"
 HELP_TEXT = """CacheGate 是一个轻量级 Codex 插件，帮助你留意长时间中断后继续会话的上下文开销。
 提示词缓存（KV 缓存）可能在长时间空闲后失效，重新处理长上下文可能增加耗时和输入成本。
 它在发送前检查同一会话的消息间隔，超过 30 分钟时默认仅提醒；也可切换为拦截，由你决定继续发送或手动 /clear 新建会话。
@@ -143,7 +144,7 @@ class Gate:
             result = db.execute("UPDATE pending SET approved = 1 WHERE session_id = ?", (session,))
             if not result.rowcount:
                 return stopped("本会话没有待确认的消息。" + HELP_HINT)
-            return stopped("已允许本次消息，请原样重发。")
+            return stopped("已允许最后一条被拦截的消息，请以原模型原样重发。")
         db.execute("DELETE FROM pending WHERE session_id = ?", (session,))
         return stopped("已撤销本会话的单次许可。")
 
@@ -172,7 +173,9 @@ class Gate:
                 ).fetchone()
                 if pending != (digest, 1):
                     db.execute("INSERT OR REPLACE INTO pending VALUES (?, ?, 0)", (session, digest))
-                    return blocked(f"{elapsed}，本次已拦截。" + HELP_HINT)
+                    if pending is not None and pending[1] == 1:
+                        return blocked("消息文本或模型与许可不匹配，本次已拦截。" + ALLOW_HINT)
+                    return blocked(f"{elapsed}，本次已拦截。" + ALLOW_HINT)
             else:
                 notice = {"systemMessage": f"CacheGate：{elapsed}，本次继续发送。" + HELP_HINT}
         db.execute(

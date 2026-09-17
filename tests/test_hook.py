@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,22 @@ class HookProcessTests(unittest.TestCase):
     def test_separate_processes_share_mode(self):
         self.assertFalse(self.run_hook("cachegate confirm")["continue"])
         self.assertEqual(self.run_hook(), {})
+
+    def test_multiple_blocks_allow_and_retry_across_processes(self):
+        self.run_hook("cachegate confirm")
+        self.assertEqual(self.run_hook("First request"), {})
+        with sqlite3.connect(self.directory / "state.sqlite3") as db:
+            db.execute("UPDATE sessions SET last_at = 0")
+        for prompt in ("Request A", "Request B", "Request B"):
+            result = self.run_hook(prompt)
+            self.assertEqual(result["decision"], "block")
+            self.assertIn("cachegate allow", result["reason"])
+            self.assertNotIn("cachegate help", result["reason"])
+        self.assertFalse(self.run_hook("cachegate allow")["continue"])
+        self.assertEqual(self.run_hook("Request B"), {})
+        with sqlite3.connect(self.directory / "state.sqlite3") as db:
+            db.execute("UPDATE sessions SET last_at = 0")
+        self.assertEqual(self.run_hook("Request B")["decision"], "block")
 
     def test_malformed_input_returns_blocking_json(self):
         for raw in ("broken JSON", "[]", "null", "{}", '{"prompt":null}'):

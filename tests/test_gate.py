@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "cachegate" / "scripts"))
-from cachegate import Gate, HELP_HINT, Store, THRESHOLD_SECONDS
+from cachegate import ALLOW_HINT, Gate, HELP_HINT, Store, THRESHOLD_SECONDS
 
 
 class GateTests(unittest.TestCase):
@@ -34,7 +34,8 @@ class GateTests(unittest.TestCase):
 
     def assert_blocked(self, result):
         self.assertEqual(result["decision"], "block")
-        self.assertIn(HELP_HINT, result["reason"])
+        self.assertIn(ALLOW_HINT, result["reason"])
+        self.assertNotIn("cachegate help", result["reason"])
 
     def test_first_use_defaults_to_remind_without_configuration(self):
         self.assertEqual(self.submit(), {})
@@ -121,20 +122,53 @@ class GateTests(unittest.TestCase):
         self.expire()
         self.assert_blocked(self.submit())
 
+    def test_multiple_blocks_then_allow_latest_message_once(self):
+        self.seed()
+        previous = self.store.last("session-a")
+        self.expire()
+        for prompt in ("Request A", "Request B", "Request B", "Request C"):
+            self.assert_blocked(self.submit(prompt))
+        self.assertEqual(self.store.last("session-a"), previous)
+        self.assertFalse(self.submit("cachegate allow")["continue"])
+        for command in ("help", "status"):
+            self.assertFalse(self.submit("cachegate " + command)["continue"])
+        self.assertEqual(self.store.last("session-a"), previous)
+        self.assertEqual(self.submit("Request C"), {})
+        self.expire()
+        self.assert_blocked(self.submit("Request C"))
+
     def test_allow_is_bound_to_text_and_changed_request_revokes_it(self):
         self.seed()
         self.expire()
         self.assert_blocked(self.submit("Request A"))
         self.submit("cachegate allow")
-        self.assert_blocked(self.submit("Request B"))
+        result = self.submit("Request B")
+        self.assert_blocked(result)
+        self.assertIn("与许可不匹配", result["reason"])
         self.assert_blocked(self.submit("Request A"))
+
+    def test_older_retry_explains_mismatch_and_can_be_allowed_again(self):
+        self.seed()
+        previous = self.store.last("session-a")
+        self.expire()
+        self.assert_blocked(self.submit("Request A"))
+        self.assert_blocked(self.submit("Request B"))
+        self.submit("cachegate allow")
+        result = self.submit("Request A")
+        self.assert_blocked(result)
+        self.assertIn("与许可不匹配", result["reason"])
+        self.assertEqual(self.store.last("session-a"), previous)
+        self.submit("cachegate allow")
+        self.assertEqual(self.submit("Request A"), {})
 
     def test_allow_is_bound_to_model(self):
         self.seed()
         self.expire()
         self.assert_blocked(self.submit())
         self.submit("cachegate allow")
-        self.assert_blocked(self.submit(model="model-b"))
+        result = self.submit(model="model-b")
+        self.assert_blocked(result)
+        self.assertIn("与许可不匹配", result["reason"])
 
     def test_allow_is_bound_to_session(self):
         self.seed()
