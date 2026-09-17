@@ -21,8 +21,9 @@ MODES = ("remind", "confirm")
 DEFAULT_MODE = "remind"
 LABELS = {"remind": "仅提醒", "confirm": "超时确认"}
 HELP_HINT = "切换模式等功能见 cachegate help。"
-HELP_TEXT = """CacheGate 是一个轻量级 Codex 插件，用于在发送前检查同一会话的消息间隔。
-超过 30 分钟时默认仅提醒，也可切换为拦截并由用户决定是否发送。
+HELP_TEXT = """CacheGate 是一个轻量级 Codex 插件，帮助你留意长时间中断后继续会话的上下文开销。
+提示词缓存（KV 缓存）可能在长时间空闲后失效，重新处理长上下文可能增加耗时和输入成本。
+它在发送前检查同一会话的消息间隔，超过 30 分钟时默认仅提醒；也可切换为拦截，由你决定继续发送或手动 /clear 新建会话。
 
 在 Codex 输入框单独提交以下命令：
 
