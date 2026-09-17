@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,7 +51,7 @@ class Client:
         self.backlog = []
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
-        self.rpc("initialize", {"clientInfo": {"name": "cachegate_test", "version": "0.1.0"}, "capabilities": {"experimentalApi": True}})
+        self.rpc("initialize", {"clientInfo": {"name": "cachegate_test", "version": "0.2.0"}, "capabilities": {"experimentalApi": True}})
         self.send({"method": "initialized"})
 
     def read(self):
@@ -123,8 +122,8 @@ model_provider = "cachegate-test"
 model = "mock-model"
 approval_policy = "on-request"
 sandbox_mode = "read-only"
-mcp_optional_startup_grace_ms = 0
 [features]
+enable_request_compression = false
 apps = false
 remote_plugin = false
 memories = false
@@ -149,57 +148,80 @@ supports_websockets = false
         thread = client.rpc("thread/start", {"cwd": str(scratch), "baseInstructions": "Reply OK.", "config": {"bypass_hook_trust": True}})["thread"]["id"]
         store = Store(scratch / "data")
 
-        def start():
-            client.rpc("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "Test message", "text_elements": []}]})
-
-        def answer(action, content=None):
-            event = client.wait(lambda x: x.get("method") == "mcpServer/elicitation/request")
+        def submit(text, expected_requests):
+            result = client.rpc("turn/start", {
+                "threadId": thread,
+                "input": [{"type": "text", "text": text, "text_elements": []}],
+            })
+            turn = result["turn"]["id"]
+            client.wait(lambda x: x.get("method") == "turn/completed"
+                        and x["params"]["turn"]["id"] == turn)
             self.assertEqual(len(FakeModel.requests), expected_requests)
-            client.send({"id": event["id"], "result": {"action": action, "content": content}})
-            return event
 
-        def complete():
-            event = client.wait(lambda x: x.get("method") == "turn/completed")
-            return event
+        def expire():
+            with store.transaction() as db:
+                db.execute("UPDATE sessions SET last_at = ? WHERE id = ?", (time.time() - 1801, thread))
+            return store.last(thread)
 
-        expected_requests = 0
-        start()
-        answer("cancel")
-        complete()
-        self.assertEqual(len(FakeModel.requests), 0)
+        submit("First unconfigured request", 0)
         self.assertIsNone(store.mode())
-
-        start()
-        answer("accept", {"mode": "confirm"})
-        complete()
-        self.assertEqual(len(FakeModel.requests), 1)
+        submit("cachegate help", 0)
+        help_event = client.wait(
+            lambda x: x.get("method") == "hook/completed"
+            and any("cachegate allow" in entry.get("text", "") for entry in x["params"]["run"]["entries"])
+        )
+        self.assertTrue(help_event)
+        submit("cachegate confirm", 0)
         self.assertEqual(store.mode(), "confirm")
+        submit("Fresh model request", 1)
 
-        old = store.last(thread)
-        self.assertIsNotNone(old)
-        store.record(thread, old[1], time.time() - 1801, old)
-        baseline = store.last(thread)
-        expected_requests = 1
-        start()
-        answer("decline")
-        complete()
-        self.assertEqual(len(FakeModel.requests), 1)
+        baseline = expire()
+        submit("Pending model request", 1)
         self.assertEqual(store.last(thread), baseline)
+        submit("cachegate status", 1)
+        submit("cachegate help", 1)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate allow", 1)
+        self.assertEqual(store.last(thread), baseline)
+        submit("Pending model request", 2)
 
-        start()
-        answer("accept", {"action": "send"})
-        complete()
-        self.assertEqual(len(FakeModel.requests), 2)
-
-        old = store.last(thread)
-        store.record(thread, old[1], time.time() - 1801, old)
-        store.set_mode("remind")
-        start()
-        complete()
-        self.assertEqual(len(FakeModel.requests), 3)
-        warning = client.wait(lambda x: x.get("method") == "hook/completed" and any("超过 30 分钟" in e.get("text", "") for e in x["params"]["run"]["entries"]))
-        self.assertTrue(warning)
+        baseline = expire()
+        submit("Cancelled then reminded request", 2)
+        submit("cachegate allow", 2)
+        submit("cachegate cancel", 2)
+        submit("Cancelled then reminded request", 2)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate remind", 2)
+        self.assertEqual(store.mode(), "remind")
+        submit("Cancelled then reminded request", 3)
+        warning = client.wait(
+            lambda x: x.get("method") == "hook/completed"
+            and any("本次继续发送" in e.get("text", "") for e in x["params"]["run"]["entries"])
+        )
+        notices = [e["text"] for e in warning["params"]["run"]["entries"] if "本次继续发送" in e.get("text", "")]
+        self.assertEqual(len(notices), 1)
+        self.assertLess(len(notices[0]), 90)
+        self.assertIn("cachegate help", notices[0])
         self.assertFalse(any(x.get("method") == "mcpServer/elicitation/request" for x in client.backlog))
+        self.assertFalse(any(
+            x.get("method") == "mcpServer/startupStatus"
+            and "cachegate" in json.dumps(x) for x in client.backlog
+        ))
+
+        # Inspect actual HTTP bodies, including the next request after local controls.
+        payloads = [json.loads(raw) for raw in FakeModel.requests]
+        model_text = json.dumps(payloads, ensure_ascii=False)
+        for local_only in (
+            "cachegate help", "cachegate confirm", "cachegate status",
+            "cachegate allow", "cachegate cancel", "cachegate remind",
+            "First unconfigured request", "CacheGate", "mcp__cachegate",
+        ):
+            self.assertNotIn(local_only, model_text)
+        self.assertIn("Pending model request", model_text)
+        self.assertIn("Cancelled then reminded request", model_text)
+        (scratch / "model-requests.json").write_text(
+            json.dumps(payloads, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
 
 if __name__ == "__main__":

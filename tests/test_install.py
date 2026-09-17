@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,14 +18,24 @@ class InstallTests(unittest.TestCase):
         self.state = self.home_dir / "data"
         self.market = self.home_dir / ".agents" / "plugins" / "marketplace.json"
 
-    def test_prepared_package_has_absolute_runtime_and_state_paths(self):
+    def test_prepared_hook_runs_from_another_directory_without_mcp(self):
         destination = self.home_dir / "plugins" / "cachegate"
         prepare_plugin(destination, self.state)
-        config = json.loads((destination / ".mcp.json").read_text())
-        server = config["mcpServers"]["cachegate"]
-        self.assertTrue(Path(server["command"]).is_absolute())
-        self.assertTrue(Path(server["args"][0]).is_file())
-        self.assertEqual(server["env"]["CACHEGATE_DATA_DIR"], str(self.state))
+        config = json.loads((destination / "hooks/hooks.json").read_text())
+        handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(handler["type"], "command")
+        self.assertFalse((destination / ".mcp.json").exists())
+        manifest = json.loads((destination / ".codex-plugin/plugin.json").read_text())
+        self.assertNotIn("mcpServers", manifest)
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": "session",
+                   "turn_id": "turn", "prompt": "cachegate confirm"}
+        result = subprocess.run(
+            ["rtk", "proxy", "bash", "-c", handler["command"]], cwd=self.home_dir,
+            env={**os.environ, "PLUGIN_ROOT": str(destination)},
+            input=json.dumps(payload), capture_output=True, text=True, check=True,
+        )
+        self.assertFalse(json.loads(result.stdout)["continue"])
+        self.assertTrue((self.state / "state.sqlite3").exists())
 
     def test_default_personal_marketplace(self):
         name, destination, market = register_personal(self.home_dir, self.state)

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 
 
 def prepare_plugin(destination, state_dir):
-    """Materialize absolute runtime paths: Codex 0.154 legacy MCP needs them."""
+    """Use the installed hook's own root and an explicit, stable data directory."""
     destination = destination.resolve()
     if destination.exists():
         raise FileExistsError(f"已存在插件目录，不覆盖：{destination}")
@@ -25,12 +26,15 @@ def prepare_plugin(destination, state_dir):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SOURCE / relative, target)
-    mcp = json.loads((SOURCE / ".mcp.json").read_text(encoding="utf-8"))
-    server = mcp["mcpServers"]["cachegate"]
-    server["command"] = sys.executable
-    server["args"] = [str(destination / "scripts" / "cachegate.py"), "serve"]
-    server["env"] = {"CACHEGATE_DATA_DIR": str(state_dir.resolve())}
-    (destination / ".mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    config = json.loads((destination / "hooks/hooks.json").read_text(encoding="utf-8"))
+    handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    handler["command"] = (
+        shlex.quote(sys.executable) + ' "${PLUGIN_ROOT}/scripts/cachegate.py" '
+        + shlex.join(["--data-dir", str(state_dir.resolve()), "hook"])
+    )
+    (destination / "hooks/hooks.json").write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def register_personal(home_dir, state_dir):
@@ -86,7 +90,7 @@ def main():
             parser.exit(result.returncode, f"Codex 安装失败。源文件和市场条目已保留；解决错误后重试：codex plugin add {selector}\n")
     else:
         print(f"准备完成，安装命令：codex plugin add {selector}")
-    print("安装后新建会话，在 /hooks 审阅并信任 CacheGate，再提交消息选择模式。")
+    print("安装后新建会话，在 /hooks 审阅并信任 CacheGate，然后输入 cachegate help。")
 
 
 if __name__ == "__main__":

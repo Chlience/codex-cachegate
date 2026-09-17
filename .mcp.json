@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "cachegate": {
-      "command": "python3",
-      "args": ["./scripts/cachegate.py", "serve"]
-    }
-  }
-}
