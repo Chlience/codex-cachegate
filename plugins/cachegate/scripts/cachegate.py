@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import hashlib
 import json
 import math
 import os
@@ -21,7 +20,7 @@ MODES = ("remind", "confirm")
 DEFAULT_MODE = "remind"
 LABELS = {"remind": "仅提醒", "confirm": "超时确认"}
 HELP_HINT = "切换模式等功能见 cachegate help。"
-ALLOW_HINT = "提交 cachegate allow 后，原样重发最后一条被拦截的消息。"
+ALLOW_HINT = "提交 cachegate allow 后，再发送消息即可放行一次。"
 HELP_TEXT = """CacheGate 是一个轻量级 Codex 插件，帮助你留意长时间中断后继续会话的上下文开销。
 提示词缓存（KV 缓存）可能在长时间空闲后失效，重新处理长上下文可能增加耗时和输入成本。
 它在发送前检查同一会话的消息间隔，超过 30 分钟时默认仅提醒；也可切换为拦截，由你决定继续发送或手动 /clear 新建会话。
@@ -33,11 +32,12 @@ cachegate confirm  超过 30 分钟时拦截
 cachegate status   查看当前模式
 
 仅在超时拦截后使用：
-cachegate allow    允许原样重发最近被拦截的消息一次，不会自动发送
+cachegate allow    允许本会话下一条普通消息一次，不会自动发送
 cachegate cancel   撤销单次许可和待确认记录
 
-模式在本机共享，下次提交生效。单次许可只用于对应会话和消息文本。
-不想发送时直接不重发即可，无需 cancel。也可手动 /clear 新建会话。
+模式在本机共享，下次提交生效。单次许可只用于对应会话，可修改消息或切换模型。
+控制命令不消耗许可；下一条普通消息获准提交后消耗许可并重新计时。
+不想发送时直接不发送；已授予的许可可用 cachegate cancel 撤销。也可手动 /clear 新建会话。
 时间阈值无法保证 KV 缓存命中，/clear 不会恢复过期缓存。"""
 
 
@@ -64,6 +64,7 @@ class Store:
                 db.execute("""CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY, last_at REAL NOT NULL,
                     turn_id TEXT NOT NULL)""")
+                # Retain the legacy digest column for existing databases; new rows leave it empty.
                 db.execute("""CREATE TABLE IF NOT EXISTS pending (
                     session_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
                     approved INTEGER NOT NULL DEFAULT 0)""")
@@ -132,7 +133,7 @@ class Gate:
         with self.store.transaction() as db:
             if command:
                 return self.control(db, command, session)
-            return self.check(db, payload, session, turn)
+            return self.check(db, session, turn)
 
     def control(self, db, command, session):
         if command in MODES:
@@ -144,18 +145,15 @@ class Gate:
             result = db.execute("UPDATE pending SET approved = 1 WHERE session_id = ?", (session,))
             if not result.rowcount:
                 return stopped("本会话没有待确认的消息。" + HELP_HINT)
-            return stopped("已允许最后一条被拦截的消息，请以原模型原样重发。")
+            return stopped("已允许本会话下一条普通消息一次，请发送消息（可修改内容或切换模型）。")
         db.execute("DELETE FROM pending WHERE session_id = ?", (session,))
         return stopped("已撤销本会话的单次许可。")
 
-    def check(self, db, payload, session, turn):
+    def check(self, db, session, turn):
         mode = read_mode(db)
         now = self.clock()
         if not math.isfinite(now):
             raise ValueError("Invalid clock")
-        # The hook exposes text and model, not attachment bytes or the final API body.
-        identity = json.dumps([payload["prompt"], payload.get("model")], ensure_ascii=False)
-        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         previous = db.execute(
             "SELECT last_at FROM sessions WHERE id = ?", (session,)
         ).fetchone()
@@ -169,12 +167,10 @@ class Gate:
             elapsed = "已超过 30 分钟" if gap > 0 else "系统时间回退"
             if mode == "confirm":
                 pending = db.execute(
-                    "SELECT digest, approved FROM pending WHERE session_id = ?", (session,)
+                    "SELECT approved FROM pending WHERE session_id = ?", (session,)
                 ).fetchone()
-                if pending != (digest, 1):
-                    db.execute("INSERT OR REPLACE INTO pending VALUES (?, ?, 0)", (session, digest))
-                    if pending is not None and pending[1] == 1:
-                        return blocked("消息文本或模型与许可不匹配，本次已拦截。" + ALLOW_HINT)
+                if pending != (1,):
+                    db.execute("INSERT OR REPLACE INTO pending (session_id, digest, approved) VALUES (?, '', 0)", (session,))
                     return blocked(f"{elapsed}，本次已拦截。" + ALLOW_HINT)
             else:
                 notice = {"systemMessage": f"CacheGate：{elapsed}，本次继续发送。" + HELP_HINT}

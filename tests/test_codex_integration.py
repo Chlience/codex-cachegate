@@ -222,18 +222,27 @@ supports_websockets = false
         submit("cachegate help", 2)
         self.assertEqual(store.last(thread), baseline)
         submit("cachegate allow", 2)
+        submit("cachegate status", 2)
+        submit("cachegate help", 2)
         self.assertEqual(store.last(thread), baseline)
-        submit("Pending model request", 3)
+        submit("Older blocked request", 3)
 
         baseline = expire()
-        submit("Cancelled then reminded request", 3)
+        submit("Original request before editing", 3)
+        check_blocked()
         submit("cachegate allow", 3)
-        submit("cachegate cancel", 3)
-        submit("Cancelled then reminded request", 3)
         self.assertEqual(store.last(thread), baseline)
-        submit("cachegate remind", 3)
-        self.assertEqual(store.mode(), "remind")
+        submit("Edited request after approval", 4)
+
+        baseline = expire()
         submit("Cancelled then reminded request", 4)
+        submit("cachegate allow", 4)
+        submit("cachegate cancel", 4)
+        submit("Cancelled then reminded request", 4)
+        self.assertEqual(store.last(thread), baseline)
+        submit("cachegate remind", 4)
+        self.assertEqual(store.mode(), "remind")
+        submit("Cancelled then reminded request", 5)
         check_reminder()
         self.assertFalse(any(x.get("method") == "mcpServer/elicitation/request" for x in client.backlog))
         self.assertFalse(any(
@@ -248,10 +257,11 @@ supports_websockets = false
             "cachegate help", "cachegate confirm", "cachegate status",
             "cachegate allow", "cachegate cancel", "cachegate remind",
             "CacheGate", "mcp__cachegate",
-            "Older blocked request", "Another blocked request",
+            "Another blocked request", "Pending model request", "Original request before editing",
         ):
             self.assertNotIn(local_only, model_text)
-        self.assertIn("Pending model request", model_text)
+        self.assertIn("Older blocked request", model_text)
+        self.assertIn("Edited request after approval", model_text)
         self.assertIn("Fresh model request", model_text)
         self.assertIn("Default reminder request", model_text)
         self.assertIn("Cancelled then reminded request", model_text)

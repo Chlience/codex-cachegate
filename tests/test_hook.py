@@ -16,9 +16,9 @@ class HookProcessTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
 
-    def run_hook(self, prompt="Ordinary request", raw=None):
+    def run_hook(self, prompt="Ordinary request", raw=None, model="test"):
         payload = {"hook_event_name": "UserPromptSubmit", "session_id": "session",
-                   "turn_id": "turn", "prompt": prompt, "model": "test"}
+                   "turn_id": "turn", "prompt": prompt, "model": model}
         result = subprocess.run(
             ["rtk", "proxy", sys.executable, str(SCRIPT), "--data-dir", str(self.directory), "hook"],
             input=json.dumps(payload) if raw is None else raw,
@@ -48,7 +48,9 @@ class HookProcessTests(unittest.TestCase):
             self.assertIn("cachegate allow", result["reason"])
             self.assertNotIn("cachegate help", result["reason"])
         self.assertFalse(self.run_hook("cachegate allow")["continue"])
-        self.assertEqual(self.run_hook("Request B"), {})
+        self.assertFalse(self.run_hook("cachegate help")["continue"])
+        self.assertFalse(self.run_hook("cachegate status")["continue"])
+        self.assertEqual(self.run_hook("Request A (edited)", model="changed-model"), {})
         with sqlite3.connect(self.directory / "state.sqlite3") as db:
             db.execute("UPDATE sessions SET last_at = 0")
         self.assertEqual(self.run_hook("Request B")["decision"], "block")

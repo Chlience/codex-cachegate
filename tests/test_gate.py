@@ -122,7 +122,7 @@ class GateTests(unittest.TestCase):
         self.expire()
         self.assert_blocked(self.submit())
 
-    def test_multiple_blocks_then_allow_latest_message_once(self):
+    def test_multiple_blocks_then_allow_next_message_once(self):
         self.seed()
         previous = self.store.last("session-a")
         self.expire()
@@ -130,45 +130,61 @@ class GateTests(unittest.TestCase):
             self.assert_blocked(self.submit(prompt))
         self.assertEqual(self.store.last("session-a"), previous)
         self.assertFalse(self.submit("cachegate allow")["continue"])
-        for command in ("help", "status"):
+        for command in ("help", "status", "unknown", "remind", "confirm", "allow"):
             self.assertFalse(self.submit("cachegate " + command)["continue"])
         self.assertEqual(self.store.last("session-a"), previous)
-        self.assertEqual(self.submit("Request C"), {})
+        self.assertEqual(self.submit("Edited request", model="model-b"), {})
         self.expire()
         self.assert_blocked(self.submit("Request C"))
 
-    def test_allow_is_bound_to_text_and_changed_request_revokes_it(self):
+    def test_allow_accepts_changed_text(self):
         self.seed()
         self.expire()
         self.assert_blocked(self.submit("Request A"))
         self.submit("cachegate allow")
-        result = self.submit("Request B")
-        self.assert_blocked(result)
-        self.assertIn("与许可不匹配", result["reason"])
+        self.assertEqual(self.submit("Request B"), {})
+        self.expire()
         self.assert_blocked(self.submit("Request A"))
 
-    def test_older_retry_explains_mismatch_and_can_be_allowed_again(self):
+    def test_multiple_blocks_allow_an_earlier_message(self):
         self.seed()
         previous = self.store.last("session-a")
         self.expire()
         self.assert_blocked(self.submit("Request A"))
         self.assert_blocked(self.submit("Request B"))
         self.submit("cachegate allow")
-        result = self.submit("Request A")
-        self.assert_blocked(result)
-        self.assertIn("与许可不匹配", result["reason"])
         self.assertEqual(self.store.last("session-a"), previous)
-        self.submit("cachegate allow")
         self.assertEqual(self.submit("Request A"), {})
+        self.assertEqual(self.store.last("session-a")[0], self.now)
 
-    def test_allow_is_bound_to_model(self):
+    def test_allow_accepts_changed_model(self):
         self.seed()
         self.expire()
         self.assert_blocked(self.submit())
         self.submit("cachegate allow")
-        result = self.submit(model="model-b")
-        self.assert_blocked(result)
-        self.assertIn("与许可不匹配", result["reason"])
+        self.assertEqual(self.submit(model="model-b"), {})
+
+    def test_normal_message_consumes_permission_in_reminder_mode(self):
+        self.seed()
+        self.expire()
+        self.assert_blocked(self.submit())
+        self.submit("cachegate allow")
+        self.submit("cachegate remind")
+        self.assertIn("systemMessage", self.submit("Changed request"))
+        self.submit("cachegate confirm")
+        self.expire()
+        self.assert_blocked(self.submit("Another request"))
+
+    def test_normal_message_consumes_permission_when_clock_is_back_in_window(self):
+        self.seed()
+        previous = self.now
+        self.expire()
+        self.assert_blocked(self.submit())
+        self.submit("cachegate allow")
+        self.now = previous + 1
+        self.assertEqual(self.submit("Changed request"), {})
+        self.expire()
+        self.assert_blocked(self.submit("Another request"))
 
     def test_allow_is_bound_to_session(self):
         self.seed()
@@ -194,7 +210,20 @@ class GateTests(unittest.TestCase):
         self.assert_blocked(self.submit())
         self.submit("cachegate allow")
         self.gate = Gate(Store(self.directory), lambda: self.now)
-        self.assertEqual(self.submit(), {})
+        self.assertEqual(self.submit("Changed after restart", model="model-b"), {})
+
+    def test_legacy_message_permission_allows_next_submission_after_upgrade(self):
+        self.seed()
+        self.expire()
+        with self.store.transaction() as db:
+            db.execute("INSERT INTO pending VALUES (?, ?, 1)", ("session-a", "0" * 64))
+        previous = self.store.last("session-a")
+        self.gate = Gate(Store(self.directory), lambda: self.now)
+        self.assertEqual(self.store.last("session-a"), previous)
+        self.assertEqual(self.submit("New text after upgrade", model="model-b"), {})
+        self.assertEqual(self.store.mode(), "confirm")
+        self.expire()
+        self.assert_blocked(self.submit("Another request"))
 
     def test_new_session_has_no_timeout_history(self):
         self.seed()
