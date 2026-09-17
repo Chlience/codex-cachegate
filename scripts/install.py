@@ -13,7 +13,8 @@ import sys
 import tempfile
 
 
-SOURCE = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "plugins" / "cachegate"
 
 
 def prepare_plugin(destination, state_dir):
@@ -22,10 +23,11 @@ def prepare_plugin(destination, state_dir):
     if destination.exists():
         raise FileExistsError(f"已存在插件目录，不覆盖：{destination}")
     destination.mkdir(parents=True)
-    for relative in [".codex-plugin/plugin.json", "hooks/hooks.json", "scripts/cachegate.py", "README.md"]:
+    for relative in [".codex-plugin/plugin.json", "hooks/hooks.json", "scripts/cachegate.py"]:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SOURCE / relative, target)
+    shutil.copy2(ROOT / "README.md", destination / "README.md")
     config = json.loads((destination / "hooks/hooks.json").read_text(encoding="utf-8"))
     handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     handler["command"] = (

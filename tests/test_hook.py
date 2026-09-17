@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "cachegate.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "cachegate" / "scripts" / "cachegate.py"
 
 
 class HookProcessTests(unittest.TestCase):

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "cachegate" / "scripts"))
 from cachegate import Store
 from install import prepare_plugin
 
@@ -100,6 +102,12 @@ class Client:
 @unittest.skipUnless(os.environ.get("CACHEGATE_CODEX_INTEGRATION") == "1", "set CACHEGATE_CODEX_INTEGRATION=1 for isolated Codex integration")
 class CodexIntegration(unittest.TestCase):
     def test_plugin_gate_before_model_request(self):
+        self.check_plugin_gate(prepared=True)
+
+    def test_repository_package_before_model_request(self):
+        self.check_plugin_gate(prepared=False)
+
+    def check_plugin_gate(self, prepared):
         # Keep logs and fixtures for diagnosing failures; never touch the user's Codex home.
         scratch = Path(tempfile.mkdtemp(prefix="cachegate-integration-"))
         print("Integration artifacts:", scratch, flush=True)
@@ -108,10 +116,14 @@ class CodexIntegration(unittest.TestCase):
         market = scratch / "market"
         plugin = market / "plugins" / "cachegate"
         plugin.parent.mkdir(parents=True)
-        prepare_plugin(plugin, scratch / "data")
+        state_dir = scratch / "data" if prepared else codex_home / "cachegate"
+        if prepared:
+            prepare_plugin(plugin, state_dir)
+        else:
+            shutil.copytree(ROOT / "plugins" / "cachegate", plugin, ignore=shutil.ignore_patterns("__pycache__"))
         manifest = market / ".agents" / "plugins" / "marketplace.json"
         manifest.parent.mkdir(parents=True)
-        manifest.write_text(json.dumps({"name": "cachegate-test", "plugins": [{"name": "cachegate", "source": {"source": "local", "path": "./plugins/cachegate"}, "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}, "category": "Productivity"}]}))
+        manifest.write_bytes((ROOT / ".agents/plugins/marketplace.json").read_bytes())
         FakeModel.requests = []
         model_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
         self.addCleanup(model_server.server_close)
@@ -134,7 +146,8 @@ wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = false
 ''')
-        env = {**os.environ, "CODEX_HOME": str(codex_home), "CACHEGATE_DATA_DIR": str(scratch / "data")}
+        env = {**os.environ, "CODEX_HOME": str(codex_home)}
+        env.pop("CACHEGATE_DATA_DIR", None)
         client = Client(env, scratch, scratch / "install.log")
         try:
             client.rpc("plugin/install", {"pluginName": "cachegate", "marketplacePath": str(manifest)})
@@ -146,7 +159,7 @@ supports_websockets = false
         self.assertEqual(len(hooks["data"][0]["hooks"]), 1)
         self.assertEqual(hooks["data"][0]["errors"], [])
         thread = client.rpc("thread/start", {"cwd": str(scratch), "baseInstructions": "Reply OK.", "config": {"bypass_hook_trust": True}})["thread"]["id"]
-        store = Store(scratch / "data")
+        store = Store(state_dir)
 
         def submit(text, expected_requests):
             result = client.rpc("turn/start", {

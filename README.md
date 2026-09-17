@@ -12,21 +12,51 @@ cachegate help
 
 > CacheGate：已超过 30 分钟，本次已拦截。切换模式等功能见 cachegate help。
 
-## 安装
+## 安装、更新和卸载
 
 需要 Python 3.10+ 和支持 `UserPromptSubmit` command hook 的 Codex CLI。已在 Linux、Python 3.12.3、Codex CLI/app-server 0.154.0 验证。
 
-在项目目录执行一次安装：
+首次安装，在终端执行：
+
+```bash
+codex plugin marketplace add Chlience/codex-cachegate --ref main
+codex plugin add cachegate@cachegate
+```
+
+安装后新建 Codex 会话，在 `/hooks` 审阅并信任 CacheGate，再输入 `cachegate help` 选择模式。未配置模式时，普通消息会被拦截并提示打开帮助。
+
+更新已安装的 GitHub 版本：
+
+```bash
+codex plugin marketplace upgrade cachegate
+codex plugin add cachegate@cachegate
+```
+
+更新由用户主动触发。第一条刷新跟踪 `main` 的 Git 市场快照，第二条安装该来源的插件。发布新版本时需更新插件 manifest 的 `version`。更新后新建会话检查效果，并按 Codex 提示重新审阅 hook。模式和计时状态保存在插件安装目录之外。
+
+卸载插件：
+
+```bash
+codex plugin remove cachegate@cachegate
+```
+
+卸载交给 Codex 管理，CacheGate 的状态目录默认保留。需要停止跟踪该市场时，再执行 `codex plugin marketplace remove cachegate`。
+
+仓库的 `.agents/plugins/marketplace.json` 指向 `plugins/cachegate`。Codex 管理 Git 快照和插件安装缓存；运行时只需要 Python 标准库，无需运行自定义安装脚本。
+
+## 本地开发安装
+
+仅在需要独立的本地副本时，在项目目录执行：
 
 ```bash
 python3 scripts/install.py
 ```
 
-安装程序复制文件到 `~/plugins/cachegate`，向 `~/.agents/plugins/marketplace.json` 追加个人市场条目，再调用 `codex plugin add cachegate@<市场名>`。它保留市场原有内容和名称；同名目录或条目已存在时停止，不覆盖。`--prepare-only` 仅准备插件和市场条目。
+脚本复制文件到 `~/plugins/cachegate`，向 `~/.agents/plugins/marketplace.json` 追加个人市场条目，再调用 `codex plugin add cachegate@<市场名>`。它保留已有内容；同名目录或条目已存在时停止，不覆盖。`--prepare-only` 仅准备插件和市场条目。该副本不随 GitHub 市场更新。
 
-安装后新建 Codex 会话，在 `/hooks` 审阅并信任 CacheGate，再输入 `cachegate help` 选择模式。未配置模式时，普通消息会被拦截并提示打开帮助。
+本地脚本会记录当前 Python 解释器和状态目录的绝对路径；GitHub 安装使用 `python3` 和运行时的状态目录配置。两种方式均通过 `${PLUGIN_ROOT}` 查找已安装脚本，不依赖 rtk，也不注册系统 shell 命令。
 
-安装程序记录当前 Python 解释器和状态目录的绝对路径；脚本位置通过 `${PLUGIN_ROOT}` 解析到已安装的插件。移动解释器或状态目录后需重新配置。插件及安装器均不依赖 rtk，也不会注册系统 shell 命令。
+从原有个人市场安装迁移到 GitHub 源时，先用原市场名卸载旧插件，再按上面的 GitHub 流程安装，避免同一 hook 被加载两次。
 
 ## 帮助中的操作
 
@@ -53,9 +83,9 @@ python3 scripts/install.py
 - 恢复已记录会话时沿用时间戳，安装前的历史不回溯。系统时钟回退时按所选模式提醒或拦截。同一运行中的 turn 收到不同用户消息仍分别检查。
 - 本地保存模式、会话和 turn ID、时间戳、消息摘要及单次许可状态。正文仅在本次 hook 内用于识别命令和计算摘要，不保存原文，也不读取聊天记录。
 
-默认状态位于 `${CODEX_HOME:-~/.codex}/cachegate/state.sqlite3`，安装时可通过 `CACHEGATE_DATA_DIR` 指定其他目录。安装器把选定目录明确写入 hook 命令，避免子进程环境差异。旧版数据库的模式和时间戳会保留，首次运行时自动创建单次许可所需的表。
+默认状态位于 `${CODEX_HOME:-~/.codex}/cachegate/state.sqlite3`。GitHub 安装使用运行时配置；本地安装脚本可通过 `CACHEGATE_DATA_DIR` 指定并固定其他状态目录。旧版数据库的模式和时间戳会保留，首次运行时自动创建单次许可所需的表。
 
-旧版终端 `config` 入口仍兼容；需操作与插件相同的数据目录。安装器不覆盖已有插件，数据库兼容不代表已安装版本会自动更新。更新安装后需新建会话并重新审阅变更后的 hook。
+旧版终端 `config` 入口仍兼容；需操作与插件相同的数据目录。本地开发安装脚本不会覆盖已有副本，GitHub 版本则使用上面的 Codex 更新流程。
 
 ## 开销与边界
 
@@ -76,7 +106,7 @@ rtk proxy env CACHEGATE_CODEX_INTEGRATION=1 python3 -m unittest discover -s test
 
 测试命令中的 `rtk proxy` 用于本工作区约定，运行插件不需要它。
 
-集成测试使用独立临时 `CODEX_HOME`、测试状态目录和 loopback 模型服务，验证直接输入命令、首次配置、超时拦截、单次放行、取消、模式切换及请求内容。它不调用真实模型，仅在测试会话对本项目 hook 设置 `bypass_hook_trust`，不改变用户的信任配置。Codex 安装插件时可能访问自己的插件目录服务。临时目录保留日志和请求体供检查。
+集成测试使用独立临时 `CODEX_HOME`、测试状态目录和 loopback 模型服务，分别安装本地脚本生成的副本和仓库直接分发的插件包，验证直接输入命令、首次配置、超时拦截、单次放行、取消、模式切换及请求内容。它不调用真实模型，仅在测试会话对本项目 hook 设置 `bypass_hook_trust`，不改变用户的信任配置。Codex 安装插件时可能访问自己的插件目录服务。临时目录保留日志和请求体供检查。
 
 集成测试覆盖 app-server 的 hook 事件及模型请求边界；另在隔离的 Codex CLI 终端中检查了帮助展开和模式切换提示。尚未验证 Windows/macOS、桌面端或 IDE。
 

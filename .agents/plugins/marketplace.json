@@ -1,0 +1,20 @@
+{
+  "name": "cachegate",
+  "interface": {
+    "displayName": "CacheGate"
+  },
+  "plugins": [
+    {
+      "name": "cachegate",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cachegate"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
