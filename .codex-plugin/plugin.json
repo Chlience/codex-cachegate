@@ -1,0 +1,18 @@
+{
+  "name": "cachegate",
+  "version": "0.1.0",
+  "description": "Check idle time before submitting a Codex message; remind or ask for confirmation.",
+  "mcpServers": "./.mcp.json",
+  "author": {
+    "name": "chlience"
+  },
+  "interface": {
+    "displayName": "CacheGate",
+    "shortDescription": "发送前检查会话是否已间隔超过 30 分钟。",
+    "longDescription": "按会话检查用户消息的提交间隔，支持仅提醒和确认后发送。首次使用选择模式，取消时建议手动 /clear。时间间隔无法证明服务端 KV 缓存是否命中。",
+    "developerName": "chlience",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": "修改 CacheGate 的提醒或拦截模式。"
+  }
+}

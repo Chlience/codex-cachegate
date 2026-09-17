@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "cachegate",
+            "tool": "check_prompt",
+            "input": {
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}"
+            },
+            "timeout": 30,
+            "statusMessage": "CacheGate：检查消息间隔"
+          }
+        ]
+      }
+    ]
+  }
+}
