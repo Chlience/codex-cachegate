@@ -18,12 +18,21 @@ class GateTests(unittest.TestCase):
         self.gate = Gate(self.store, lambda: self.now)
         self.sequence = 0
 
-    def submit(self, prompt="Normal request", session="session-a", turn=None, model="model-a"):
+    def submit(self, prompt="Normal request", session="session-a", turn=None, model="model-a", finish=True):
         self.sequence += 1
-        return self.gate.handle({
+        turn = turn or str(self.sequence)
+        result = self.gate.handle({
             "hook_event_name": "UserPromptSubmit", "session_id": session,
-            "turn_id": turn or str(self.sequence), "prompt": prompt, "model": model,
+            "turn_id": turn, "prompt": prompt, "model": model,
         })
+        if finish and result.get("continue") is not False and result.get("decision") != "block":
+            self.finish(turn, session=session)
+        return result
+
+    def finish(self, turn, session="session-a", event="Stop"):
+        self.assertEqual(self.gate.handle({
+            "hook_event_name": event, "session_id": session, "turn_id": turn,
+        }), {})
 
     def seed(self, mode="confirm", session="session-a"):
         self.store.set_mode(mode)
@@ -102,7 +111,7 @@ class GateTests(unittest.TestCase):
             self.assertFalse(self.submit("cachegate " + command)["continue"])
             self.assertEqual(self.store.last("session-a"), previous)
 
-    def test_single_allow_is_consumed_by_retry_and_uses_retry_time(self):
+    def test_single_allow_is_consumed_by_retry(self):
         self.seed()
         previous = self.store.last("session-a")
         self.expire()
@@ -246,19 +255,105 @@ class GateTests(unittest.TestCase):
         self.submit("cachegate remind")
         self.assertIn("系统时间回退", self.submit()["systemMessage"])
 
-    def test_identical_user_message_in_same_turn_is_checked(self):
+    def test_identical_message_during_long_turn_is_not_idle(self):
         self.store.set_mode("confirm")
-        self.assertEqual(self.submit(turn="same-turn"), {})
-        previous = self.store.last("session-a")
+        self.assertEqual(self.submit(turn="same-turn", finish=False), {})
         self.expire()
-        self.assert_blocked(self.submit(turn="same-turn"))
-        self.assertEqual(self.store.last("session-a"), previous)
+        self.assertEqual(self.submit(turn="same-turn", finish=False), {})
+        self.finish("same-turn")
+        self.expire()
+        self.assert_blocked(self.submit())
 
-    def test_different_user_message_in_same_turn_is_checked(self):
+    def test_different_message_during_long_turn_is_not_idle(self):
         self.store.set_mode("confirm")
-        self.assertEqual(self.submit("First", turn="same-turn"), {})
+        self.assertEqual(self.submit("First", turn="same-turn", finish=False), {})
         self.expire()
-        self.assert_blocked(self.submit("Second", turn="same-turn"))
+        self.assertEqual(self.submit("Second", turn="same-turn", finish=False), {})
+        self.finish("same-turn")
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_long_task_starts_idle_clock_only_on_completion(self):
+        self.store.set_mode("confirm")
+        self.assertEqual(self.submit(turn="long", finish=False), {})
+        self.now += 7200
+        self.finish("long")
+        self.now += 300
+        self.assertEqual(self.submit(), {})
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_exact_threshold_after_long_task_is_allowed(self):
+        self.store.set_mode("confirm")
+        self.submit(turn="long", finish=False)
+        self.now += 7200
+        self.finish("long")
+        self.now += THRESHOLD_SECONDS
+        self.assertEqual(self.submit(), {})
+
+    def test_interrupt_starts_idle_clock(self):
+        self.store.set_mode("confirm")
+        self.submit(turn="long", finish=False)
+        self.now += 7200
+        self.finish("long", event="Interrupt")
+        self.assertEqual(self.submit(), {})
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_controls_and_blocked_turn_end_events_do_not_refresh_clock_or_consume_allow(self):
+        self.seed()
+        self.expire()
+        self.assert_blocked(self.submit(turn="blocked"))
+        self.finish("blocked")
+        self.submit("cachegate status", turn="control")
+        self.finish("control", event="Interrupt")
+        self.assert_blocked(self.submit())
+        self.submit("cachegate allow", turn="approval")
+        self.finish("approval")
+        self.assertEqual(self.submit("Changed request"), {})
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_late_duplicate_end_event_does_not_refresh_idle_clock(self):
+        self.store.set_mode("confirm")
+        self.submit(turn="finished")
+        self.expire()
+        for event in ("Stop", "Interrupt"):
+            self.finish("finished", event=event)
+        self.assert_blocked(self.submit())
+
+    def test_unrelated_end_cannot_finish_an_active_turn(self):
+        self.store.set_mode("confirm")
+        self.submit(turn="old")
+        self.submit(turn="active", finish=False)
+        self.finish("old")
+        self.finish("active", session="different-session")
+        self.expire()
+        self.assertEqual(self.submit(turn="active", finish=False), {})
+        self.finish("active")
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_missing_end_event_recovers_after_next_completed_turn(self):
+        self.store.set_mode("confirm")
+        self.submit(turn="lost", finish=False)
+        self.expire()
+        self.gate = Gate(Store(self.directory), lambda: self.now)
+        self.assertEqual(self.submit(turn="recovered"), {})
+        self.expire()
+        self.assert_blocked(self.submit())
+
+    def test_allowed_long_task_uses_completion_time_and_consumes_permission(self):
+        self.seed()
+        self.expire()
+        self.assert_blocked(self.submit())
+        self.submit("cachegate allow")
+        self.assertEqual(self.submit("Changed", turn="allowed", finish=False), {})
+        self.now += 7200
+        self.finish("allowed")
+        self.assertEqual(self.submit(), {})
+        self.expire()
+        self.assert_blocked(self.submit())
 
     def test_prose_and_multiline_mentions_are_normal_messages(self):
         self.store.set_mode("remind")
@@ -290,10 +385,16 @@ class GateTests(unittest.TestCase):
             db.execute("INSERT INTO settings VALUES ('mode', 'confirm')")
             db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, last_at REAL NOT NULL, turn_id TEXT NOT NULL)")
             db.execute("INSERT INTO sessions VALUES ('session-a', 1, 'old-turn')")
+            db.execute("CREATE TABLE pending (session_id TEXT PRIMARY KEY, digest TEXT NOT NULL, approved INTEGER NOT NULL DEFAULT 0)")
+            db.execute("INSERT INTO pending VALUES ('session-a', 'legacy-digest', 1)")
         db.close()
-        self.assert_blocked(self.submit())
         self.assertEqual(self.store.mode(), "confirm")
         self.assertEqual(self.store.last("session-a"), (1, "old-turn"))
+        with self.store.transaction() as db:
+            self.assertEqual(db.execute("SELECT digest, approved FROM pending").fetchone(), ("legacy-digest", 1))
+        self.assertEqual(self.submit(), {})
+        self.expire()
+        self.assert_blocked(self.submit())
 
     def test_state_does_not_store_prompt_plaintext(self):
         self.seed()

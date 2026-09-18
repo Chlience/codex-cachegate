@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,20 @@ class InstallTests(unittest.TestCase):
         )
         self.assertFalse(json.loads(result.stdout)["continue"])
         self.assertTrue((self.state / "state.sqlite3").exists())
+        for event in ("Stop", "Interrupt"):
+            for hook_event in ("UserPromptSubmit", event):
+                handler = config["hooks"][hook_event][0]["hooks"][0]
+                payload.update(hook_event_name=hook_event, prompt="Ordinary request", turn_id=event)
+                result = subprocess.run(
+                    ["rtk", "proxy", "bash", "-c", handler["command"]], cwd=self.home_dir,
+                    env={**os.environ, "PLUGIN_ROOT": str(destination)},
+                    input=json.dumps(payload), capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(json.loads(result.stdout), {})
+            with sqlite3.connect(self.state / "state.sqlite3") as db:
+                ended, active = db.execute("SELECT ended_at, active_turn_id FROM sessions").fetchone()
+            self.assertIsNotNone(ended)
+            self.assertIsNone(active)
 
     def test_default_personal_marketplace(self):
         name, destination, market = register_personal(self.home_dir, self.state)

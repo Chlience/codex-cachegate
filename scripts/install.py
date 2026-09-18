@@ -29,11 +29,13 @@ def prepare_plugin(destination, state_dir):
         shutil.copy2(SOURCE / relative, target)
     shutil.copy2(ROOT / "README.md", destination / "README.md")
     config = json.loads((destination / "hooks/hooks.json").read_text(encoding="utf-8"))
-    handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
-    handler["command"] = (
-        shlex.quote(sys.executable) + ' "${PLUGIN_ROOT}/scripts/cachegate.py" '
-        + shlex.join(["--data-dir", str(state_dir.resolve()), "hook"])
-    )
+    for event, groups in config["hooks"].items():
+        for group in groups:
+            for handler in group["hooks"]:
+                handler["command"] = (
+                    shlex.quote(sys.executable) + ' "${PLUGIN_ROOT}/scripts/cachegate.py" '
+                    + shlex.join(["--data-dir", str(state_dir.resolve()), "hook", "--event", event])
+                )
     (destination / "hooks/hooks.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

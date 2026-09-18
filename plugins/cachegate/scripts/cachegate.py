@@ -18,12 +18,13 @@ import time
 THRESHOLD_SECONDS = 30 * 60
 MODES = ("remind", "confirm")
 DEFAULT_MODE = "remind"
+END_EVENTS = ("Stop", "Interrupt")
 LABELS = {"remind": "仅提醒", "confirm": "超时确认"}
 HELP_HINT = "切换模式等功能见 cachegate help。"
 ALLOW_HINT = "提交 cachegate allow 后，再发送消息即可放行一次。"
 HELP_TEXT = """CacheGate 是一个轻量级 Codex 插件，帮助你留意长时间中断后继续会话的上下文开销。
 提示词缓存（KV 缓存）可能在长时间空闲后失效，重新处理长上下文可能增加耗时和输入成本。
-它在发送前检查同一会话的消息间隔，超过 30 分钟时默认仅提醒；也可切换为拦截，由你决定继续发送或手动 /clear 新建会话。
+它在发送前检查距同一会话上一轮结束或中断的空闲时间，超过 30 分钟时默认仅提醒；也可切换为拦截，由你决定继续发送或手动 /clear 新建会话。
 
 在 Codex 输入框单独提交以下命令：
 
@@ -36,7 +37,7 @@ cachegate allow    允许本会话下一条普通消息一次，不会自动发�
 cachegate cancel   撤销单次许可和待确认记录
 
 模式在本机共享，下次提交生效。单次许可只用于对应会话，可修改消息或切换模型。
-控制命令不消耗许可；下一条普通消息获准提交后消耗许可并重新计时。
+控制命令不消耗许可；下一条普通消息获准提交后消耗许可，执行结束或中断后重新计时。
 不想发送时直接不发送；已授予的许可可用 cachegate cancel 撤销。也可手动 /clear 新建会话。
 时间阈值无法保证 KV 缓存命中，/clear 不会恢复过期缓存。"""
 
@@ -53,17 +54,22 @@ class Store:
         self.path = directory / "state.sqlite3"
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, timeout=5):
         """Serialize short local decisions and close every connection explicitly."""
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=5)
+        db = sqlite3.connect(self.path, timeout=timeout)
         try:
             with db:
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 db.execute("""CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY, last_at REAL NOT NULL,
-                    turn_id TEXT NOT NULL)""")
+                    turn_id TEXT NOT NULL, ended_at REAL, active_turn_id TEXT)""")
+                # Submission timestamps from older versions cannot establish an idle gap.
+                columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+                for name, kind in (("ended_at", "REAL"), ("active_turn_id", "TEXT")):
+                    if name not in columns:
+                        db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
                 # Retain the legacy digest column for existing databases; new rows leave it empty.
                 db.execute("""CREATE TABLE IF NOT EXISTS pending (
                     session_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
@@ -116,8 +122,19 @@ class Gate:
     def handle(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("Expected a hook object")
-        if payload.get("hook_event_name") != "UserPromptSubmit":
-            raise ValueError("Expected UserPromptSubmit")
+        event = payload.get("hook_event_name")
+        if event in END_EVENTS:
+            session, turn = self.identifiers(payload)
+            # Interrupt hooks have a three-second maximum timeout.
+            with self.store.transaction(timeout=1) as db:
+                db.execute(
+                    "UPDATE sessions SET ended_at = ?, active_turn_id = NULL "
+                    "WHERE id = ? AND active_turn_id = ?",
+                    (self.now(), session, turn),
+                )
+            return {}
+        if event != "UserPromptSubmit":
+            raise ValueError("Unsupported hook event")
         prompt = payload.get("prompt")
         if not isinstance(prompt, str):
             raise ValueError("Expected prompt text")
@@ -127,13 +144,24 @@ class Gate:
             return {"continue": False, "stopReason": HELP_TEXT}
         if command and command not in (*MODES, "status", "allow", "cancel"):
             return stopped("未知命令。" + HELP_HINT)
-        session, turn = payload.get("session_id"), payload.get("turn_id")
-        if not all(isinstance(value, str) and value for value in (session, turn)):
-            raise ValueError("Missing session or turn id")
+        session, turn = self.identifiers(payload)
         with self.store.transaction() as db:
             if command:
                 return self.control(db, command, session)
             return self.check(db, session, turn)
+
+    @staticmethod
+    def identifiers(payload):
+        session, turn = payload.get("session_id"), payload.get("turn_id")
+        if not all(isinstance(value, str) and value for value in (session, turn)):
+            raise ValueError("Missing session or turn id")
+        return session, turn
+
+    def now(self):
+        now = self.clock()
+        if not math.isfinite(now):
+            raise ValueError("Invalid clock")
+        return now
 
     def control(self, db, command, session):
         if command in MODES:
@@ -151,14 +179,12 @@ class Gate:
 
     def check(self, db, session, turn):
         mode = read_mode(db)
-        now = self.clock()
-        if not math.isfinite(now):
-            raise ValueError("Invalid clock")
+        now = self.now()
         previous = db.execute(
-            "SELECT last_at FROM sessions WHERE id = ?", (session,)
+            "SELECT ended_at FROM sessions WHERE id = ?", (session,)
         ).fetchone()
-        # A running turn can receive multiple submissions, even with identical text.
-        gap = now - previous[0] if previous else None
+        # Running turns, legacy rows and missing end events have no known idle start.
+        gap = now - previous[0] if previous and previous[0] is not None else None
         if gap is not None and not math.isfinite(gap):
             raise ValueError("Invalid stored timestamp")
         stale = gap is not None and (gap > THRESHOLD_SECONDS or gap < 0)
@@ -175,32 +201,40 @@ class Gate:
             else:
                 notice = {"systemMessage": f"CacheGate：{elapsed}，本次继续发送。" + HELP_HINT}
         db.execute(
-            "INSERT OR REPLACE INTO sessions (id, last_at, turn_id) VALUES (?, ?, ?)",
-            (session, now, turn),
+            "INSERT OR REPLACE INTO sessions (id, last_at, turn_id, ended_at, active_turn_id) "
+            "VALUES (?, ?, ?, NULL, ?)",
+            (session, now, turn, turn),
         )
         db.execute("DELETE FROM pending WHERE session_id = ?", (session,))
         return notice
 
 
-def run_hook(directory, input_stream=sys.stdin):
+def run_hook(directory, input_stream=sys.stdin, event="UserPromptSubmit"):
     try:
-        return Gate(Store(directory)).handle(json.load(input_stream))
+        payload = json.load(input_stream)
+        if not isinstance(payload, dict) or payload.get("hook_event_name") != event:
+            raise ValueError("Unexpected hook event")
+        return Gate(Store(directory)).handle(payload)
     except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        if event in END_EVENTS:
+            # A blocking Stop result would make Codex resume the model instead of stopping.
+            return {"systemMessage": "CacheGate：未能记录本轮结束时间；下次发送可能无法判断空闲时长。"}
         # A valid blocking result avoids Codex treating a process failure as a skipped hook.
         return blocked("本地检查失败。" + HELP_HINT)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CacheGate：Codex 消息提交前的 30 分钟间隔检查")
+    parser = argparse.ArgumentParser(description="CacheGate：Codex 消息提交前的 30 分钟空闲检查")
     parser.add_argument("--data-dir", type=Path, default=None)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("hook", help="处理 stdin 中的一次 Codex hook 事件")
+    hook = sub.add_parser("hook", help="处理 stdin 中的一次 Codex hook 事件")
+    hook.add_argument("--event", choices=("UserPromptSubmit", *END_EVENTS), default="UserPromptSubmit")
     config = sub.add_parser("config", help="兼容原有终端配置入口")
     config.add_argument("--mode", choices=MODES)
     args = parser.parse_args()
     directory = args.data_dir or data_dir()
     if args.command == "hook":
-        print(json.dumps(run_hook(directory), ensure_ascii=False))
+        print(json.dumps(run_hook(directory, event=args.event), ensure_ascii=False))
     else:
         store = Store(directory)
         if args.mode:

@@ -1,14 +1,14 @@
 {
   "name": "cachegate",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Check idle time locally before submitting Codex messages, with in-composer controls.",
   "author": {
     "name": "chlience"
   },
   "interface": {
     "displayName": "CacheGate",
-    "shortDescription": "发送前检查会话是否已间隔超过 30 分钟。",
-    "longDescription": "帮助你留意长时间中断后，缓存可能失效带来的长上下文重算开销。消息间隔超过 30 分钟时默认仅提醒，也可切换为拦截。在输入框提交 cachegate help 查看操作。时间间隔无法证明 KV 缓存是否命中。",
+    "shortDescription": "发送前检查距上一轮结束是否已空闲超过 30 分钟。",
+    "longDescription": "帮助你留意长时间中断后，缓存可能失效带来的长上下文重算开销。上一轮结束或中断后空闲超过 30 分钟时默认仅提醒，也可切换为拦截。在输入框提交 cachegate help 查看操作。空闲时间无法证明 KV 缓存是否命中。",
     "developerName": "chlience",
     "category": "Productivity",
     "capabilities": [],

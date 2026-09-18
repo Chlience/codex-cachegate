@@ -23,12 +23,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class FakeModel(http.server.BaseHTTPRequestHandler):
     requests = []
+    pauses = queue.Queue()
 
     def log_message(self, *args):
         pass
 
     def do_POST(self):
         self.requests.append(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        try:
+            started, release = self.pauses.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            started.set()
+            release.wait(timeout=20)
         item = {"id": "msg_mock", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "OK", "annotations": []}]}
         response = {"id": "resp_mock", "object": "response", "created_at": 1, "status": "completed", "model": "mock-model", "output": [item], "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
         events = [
@@ -41,7 +49,10 @@ class FakeModel(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # Interrupting a turn closes its pending model request.
 
 
 class Client:
@@ -125,6 +136,7 @@ class CodexIntegration(unittest.TestCase):
         manifest.parent.mkdir(parents=True)
         manifest.write_bytes((ROOT / ".agents/plugins/marketplace.json").read_bytes())
         FakeModel.requests = []
+        FakeModel.pauses = queue.Queue()
         model_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
         self.addCleanup(model_server.server_close)
         self.addCleanup(model_server.shutdown)
@@ -156,7 +168,7 @@ supports_websockets = false
         client = Client(env, scratch, scratch / "run.log")
         self.addCleanup(client.close)
         hooks = client.rpc("hooks/list", {"cwds": [str(scratch)]})
-        self.assertEqual(len(hooks["data"][0]["hooks"]), 1)
+        self.assertEqual(len(hooks["data"][0]["hooks"]), 3)
         self.assertEqual(hooks["data"][0]["errors"], [])
         thread = client.rpc("thread/start", {"cwd": str(scratch), "baseInstructions": "Reply OK.", "config": {"bypass_hook_trust": True}})["thread"]["id"]
         store = Store(state_dir)
@@ -173,7 +185,12 @@ supports_websockets = false
 
         def expire():
             with store.transaction() as db:
-                db.execute("UPDATE sessions SET last_at = ? WHERE id = ?", (time.time() - 1801, thread))
+                ended, active = db.execute(
+                    "SELECT ended_at, active_turn_id FROM sessions WHERE id = ?", (thread,)
+                ).fetchone()
+                self.assertIsNotNone(ended)
+                self.assertIsNone(active)
+                db.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (time.time() - 1801, thread))
             return store.last(thread)
 
         def check_reminder():
@@ -244,6 +261,60 @@ supports_websockets = false
         self.assertEqual(store.mode(), "remind")
         submit("Cancelled then reminded request", 5)
         check_reminder()
+
+        # Hold real HTTP responses while simulating an old submission timestamp.
+        # Completion and interruption must establish fresh idle baselines.
+        submit("cachegate confirm", 5)
+
+        def start_long_turn(text):
+            started, release = threading.Event(), threading.Event()
+            self.addCleanup(release.set)
+            FakeModel.pauses.put((started, release))
+            result = client.rpc("turn/start", {
+                "threadId": thread,
+                "input": [{"type": "text", "text": text, "text_elements": []}],
+            })
+            turn = result["turn"]["id"]
+            self.assertTrue(started.wait(timeout=10))
+            with store.transaction() as db:
+                self.assertEqual(db.execute(
+                    "SELECT ended_at, active_turn_id FROM sessions WHERE id = ?", (thread,)
+                ).fetchone(), (None, turn))
+                db.execute("UPDATE sessions SET last_at = ? WHERE id = ?", (time.time() - 7200, thread))
+            return turn, release
+
+        turn, release = start_long_turn("Long running request")
+        release.set()
+        client.wait(lambda x: x.get("method") == "turn/completed" and x["params"]["turn"]["id"] == turn)
+        self.assertGreater(time.time() - store.last(thread)[0], 1800)
+        submit("Immediately after long task", 7)
+
+        turn, release = start_long_turn("Long request with follow-up")
+        client.rpc("turn/steer", {
+            "threadId": thread, "expectedTurnId": turn,
+            "input": [{"type": "text", "text": "Follow-up during execution", "text_elements": []}],
+        })
+        release.set()
+        client.wait(lambda x: x.get("method") == "turn/completed" and x["params"]["turn"]["id"] == turn)
+        self.assertEqual(len(FakeModel.requests), 9)
+        submit("Immediately after follow-up", 10)
+
+        turn, release = start_long_turn("Interrupted long request")
+        client.rpc("turn/interrupt", {"threadId": thread, "turnId": turn})
+        client.wait(lambda x: x.get("method") == "turn/completed" and x["params"]["turn"]["id"] == turn)
+        release.set()
+        with store.transaction() as db:
+            ended, active = db.execute(
+                "SELECT ended_at, active_turn_id FROM sessions WHERE id = ?", (thread,)
+            ).fetchone()
+        self.assertIsNone(active)
+        self.assertIsNotNone(ended)
+        self.assertLess(time.time() - ended, 10)
+        self.assertGreater(time.time() - store.last(thread)[0], 1800)
+        submit("Immediately after interruption", 12)
+        expire()
+        submit("Idle after completion", 12)
+        check_blocked()
         self.assertFalse(any(x.get("method") == "mcpServer/elicitation/request" for x in client.backlog))
         self.assertFalse(any(
             x.get("method") == "mcpServer/startupStatus"
